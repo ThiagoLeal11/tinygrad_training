@@ -209,20 +209,16 @@ def generate_features(tokenizer, file_list: list[str]) -> Generator[tuple[dict, 
   duplication_factor = getenv('DUP_FACTOR', 10)
   vocab_words = list(tokenizer.vocab.keys())
 
-  def to_token(doc: DOCUMENT) -> DOCUMENT:
-    return [tokenizer.tokenize(line) for line in doc]
-
-  # TODO: Make something in parallel
   for docs in get_next_documents(file_list):
+    docs = [[tokenizer.tokenize(line) for line in doc] for doc in docs]
     for _ in range(duplication_factor):
       docs_indexes = list(range(len(docs)))
       rand_gen.shuffle(docs_indexes)
 
       for idx in docs_indexes:
         rand_idx = rand_gen.randint(0, len(docs) - 1)
-        # TODO: can improve this using the previous doc
         rand_doc = docs[rand_idx] if rand_idx != idx else docs[(rand_idx + 1) % len(docs)]
-        instance = create_instance_from_document(rand_gen, to_token(docs[idx]), to_token(rand_doc), vocab_words)
+        instance = create_instance_from_document(rand_gen, docs[idx], rand_doc, vocab_words)
         features = instance_to_features(instance, tokenizer)
         yield features, instance
 
@@ -257,5 +253,5 @@ if __name__ == "__main__":
     count += 1
     st = time.time()
 
-    if count >= 20:
+    if count >= 128:
       break
