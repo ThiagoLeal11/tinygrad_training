@@ -87,7 +87,7 @@ def _wordpiece_tokenize(text, vocab):
 class BertTokenizer:
   def __init__(self, vocab_file, is_lower_case: bool = True):
     self.vocab = {}
-    with open(vocab_file) as f:
+    with open(vocab_file, 'rb') as f:
       for line in f:
         line = line.decode("utf-8", "ignore") if isinstance(line, bytes) else line
         if (token := line.strip()) and token not in self.vocab: 
