@@ -153,7 +153,8 @@ def get_masked_lm_accuracy(input_tensor:Tensor, output_weights:Tensor, transform
 
 def get_next_sentence_output(input_tensor:Tensor, labels: Tensor, weights:Tensor, bias:Tensor):
   output = input_tensor.matmul(weights.transpose()).add(bias)
-  return output.log_softmax().binary_crossentropy_logits(labels)
+  one_hot_labels = Tensor.eye(2)[labels]
+  return output.log_softmax().binary_crossentropy_logits(one_hot_labels)
 
 def pretrain():
   model, embedding_table, s_weights, s_bias, m_weights, m_bias, p_weights = get_model_and_config(str(Path(__file__).parent.parents[2] / "extra" / "datasets" / "wiki" / "bert_config.json"))
