@@ -5,6 +5,7 @@ from pathlib import Path
 
 import numpy as np
 from extra.tokenizer.bert import BertTokenizer
+from tinygrad import Tensor
 from tinygrad.helpers import getenv
 from typing import Iterable, Generator
 
@@ -37,8 +38,15 @@ def concatenate_dict(dicts: list[dict]) -> dict:
   }
 
 
-def read_document(filepath: str) -> Generator[DOCUMENT, None, None]:
-  with open(filepath, "r") as f:
+def to_tensor(features: dict[str, np.ndarray]) -> dict[str, Tensor]:
+  return {
+    k: Tensor(v)  # TODO: Require_grads = False?
+    for k, v in features.items()
+  }
+
+
+def read_document(filepath: str, load_all: bool = False) -> Generator[DOCUMENT, None, None]:
+  with open(filepath, "r", encoding="utf-8") as f:
     document = []
     
     for line in f:
@@ -49,6 +57,18 @@ def read_document(filepath: str) -> Generator[DOCUMENT, None, None]:
         yield document
         document = []
 
+
+def read_all_document(filepath: str) -> list[DOCUMENT]:
+  with open(filepath, "r", encoding="utf-8") as f:
+    split_docs = [[]]
+    for line in f.readlines():
+      line = line.strip()
+      if not line:
+        split_docs.append([])
+      else:
+        split_docs[-1].append(line)
+
+    return [s for s in split_docs if s]
 
 def tokenize_doc(doc: DOCUMENT, tokenizer: BertTokenizer) -> DOCUMENT:
   return [tokenizer.tokenize(line) for line in doc]
@@ -139,6 +159,9 @@ def create_instance_from_document(rand_gen, doc: DOCUMENT, rand_doc: DOCUMENT, v
   tokens = ["[CLS]"] + a + ["[SEP]"] + b + ["[SEP]"]
   segment_ids = [0] * (len(a) + 2) + [1] * (len(b) + 1)
 
+  assert len(a_tokens) >= 1
+  assert len(b_tokens) >= 1
+
   masked_tokens, masked_pos, masked_labels = mask_tokens(tokens, vocab_words, rand_gen)
 
   return Instance(
@@ -151,19 +174,22 @@ def create_instance_from_document(rand_gen, doc: DOCUMENT, rand_doc: DOCUMENT, v
 
 
 def get_next_documents(filepaths: list[str]) -> Generator[list[DOCUMENT], None, None]:
-  opened_files = [read_document(f) for f in filepaths]
-  has_docs = True
-  while has_docs:
-    current_docs = []
-    for f in opened_files:
-      try:
-        current_docs.append(next(f))
-      except StopIteration:
-        pass
+  opened_files = [read_all_document(f) for f in filepaths]
+  yield from opened_files
 
-    has_docs = any(current_docs)
-    if has_docs:
-      yield current_docs
+
+  # has_docs = True
+  # while has_docs:
+  #   current_docs = []
+  #   for f in opened_files:
+  #     try:
+  #       current_docs.append(next(f))
+  #     except StopIteration:
+  #       pass
+  #
+  #   has_docs = any(current_docs)
+  #   if has_docs:
+  #     yield current_docs
 
 
 def instance_to_features(instance: Instance, tokenizer: BertTokenizer) -> dict:
@@ -176,9 +202,15 @@ def instance_to_features(instance: Instance, tokenizer: BertTokenizer) -> dict:
   pad_size = max_seq_len - len(instance.tokens)
   mask_pad_size = mas_pred_len - len(instance.masked_labels)
 
-  def padded_array(arr: list, pad_size: int = 0, dtype=np.float32) -> np.ndarray:
+  # Expanded masked labels
+  masked_labels = [-100] * max_seq_len
+  masked_lm_ids = tokenizer.convert_tokens_to_ids(instance.masked_labels)
+  for idx, label in zip(instance.masked_positions, instance.masked_labels):
+    masked_labels[idx] = tokenizer.convert_tokens_to_ids([label])[0]
+
+  def padded_array(arr: list, pad_size: int = 0, dtype=np.int16) -> np.ndarray:
     return np.expand_dims(
-      np.array(arr + [0] * pad_size, dtype=dtype), 
+      np.array(arr + [0] * pad_size, dtype=dtype),
       axis=0
     )
 
@@ -187,20 +219,10 @@ def instance_to_features(instance: Instance, tokenizer: BertTokenizer) -> dict:
     "input_mask": padded_array([1] * len(instance.tokens), pad_size),
     "segment_ids": padded_array(instance.segment_ids, pad_size),
     "masked_lm_positions": padded_array(instance.masked_positions, mask_pad_size),
-    "masked_lm_ids": padded_array(tokenizer.convert_tokens_to_ids(instance.masked_labels), mask_pad_size),
+    "masked_lm_ids": padded_array(masked_lm_ids, mask_pad_size),
+    "masked_lm_labels": padded_array(masked_labels, 0),
     "next_sentence_labels": np.array([int(instance.is_random_next)]),
   }
-
-
-def process_docs(doc_idx: int, docs: list[DOCUMENT], tokenizer: BertTokenizer, rand_gen, vocab_words: list[str]):
-  def to_token(doc: DOCUMENT) -> DOCUMENT:
-    return [tokenizer.tokenize(line) for line in doc]
-
-  rand_idx = rand_gen.randint(0, len(docs) - 1)
-  rand_doc = docs[rand_idx] if rand_idx != doc_idx else docs[(rand_idx + 1) % len(docs)]
-  instance = create_instance_from_document(rand_gen, to_token(docs[doc_idx]), to_token(rand_doc), vocab_words)
-  features = instance_to_features(instance, tokenizer)
-  return features, instance
 
 
 def generate_features(tokenizer, file_list: list[str]) -> Generator[tuple[dict, Instance], None, None]:
@@ -238,7 +260,7 @@ def load_dataset(bs: int, is_validation: bool = False) -> Generator[tuple[dict, 
       results.append(next(gen))
     features, instances = zip(*results)
 
-    yield concatenate_dict(features), instances
+    yield to_tensor(concatenate_dict(features)), instances
 
 
 if __name__ == "__main__":
@@ -248,10 +270,13 @@ if __name__ == "__main__":
   # TODO: colocar script pra baixar tudo e descompactar, se não existir
 
   st = time.time()
-  for X, Y in load_dataset(32, False):
-    print('batch', count, 'time', time.time() - st)
+  for X, Y in load_dataset(32, True):
+    # print('batch', count, 'time', time.time() - st)
     count += 1
     st = time.time()
 
-    if count >= 128:
+    if count % 1_000 == 0:
+      print('batch', count, 'time', time.time() - st)
+
+    if count >= 107538:
       break
