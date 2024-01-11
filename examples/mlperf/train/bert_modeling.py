@@ -6,7 +6,6 @@ from tinygrad import nn
 from tinygrad import Tensor
 
 from extra.models.bert import Bert
-import itertools
 
 ACT2FN = {
   "gelu": Tensor.gelu,
@@ -53,7 +52,7 @@ class BertPoller:
   def __call__(self, hidden_states: Tensor):
     # We "pool" the model by simply taking the hidden state corresponding
     # to the first token.
-    first_token_tensor = hidden_states[0]
+    first_token_tensor = hidden_states[:, 0]
     pooled_output = self.dense(first_token_tensor)
     pooled_output = self.activation(pooled_output)  # TODO: fix typing error
     return pooled_output
@@ -157,10 +156,9 @@ class BertModel(Bert):
     self.poller = BertPoller(config)
 
   def __call__(self, input_ids, attention_mask, token_type_ids):
-    encoder_outputs = super().__call__(input_ids, attention_mask, token_type_ids)
-    sequence_output = encoder_outputs[-1]
+    sequence_output = super().__call__(input_ids, attention_mask, token_type_ids)
     pooled_output = self.poller(sequence_output)
-    return encoder_outputs, pooled_output
+    return sequence_output, pooled_output
 
 
 class BertForPreTraining(PreTrainedBertModel):
@@ -173,7 +171,7 @@ class BertForPreTraining(PreTrainedBertModel):
     for children in list_children_recursively(self.bert):
       self._init_weights(children)
 
-  def __call__(self, input_ids: Tensor, token_type_ids: Tensor, attention_mask: Tensor, masked_lm_labels: Tensor, next_sentence_label: Tensor):
+  def __call__(self, input_ids: Tensor, token_type_ids: Tensor, attention_mask: Tensor, masked_lm_labels: Tensor = None, next_sentence_label: Tensor = None):
     sequence_output, pooled_output = self.bert(input_ids, attention_mask, token_type_ids)
 
     prediction_scores, seq_relationship_score = self.cls(sequence_output, pooled_output)
@@ -182,15 +180,37 @@ class BertForPreTraining(PreTrainedBertModel):
       masked_lm_loss = (
         prediction_scores
         .reshape(-1, self.config.vocab_size)
-        .sparse_categorical_crossentropy(masked_lm_labels.reshape(-1), ignore_index=-1)
+        .sparse_categorical_crossentropy(masked_lm_labels.reshape(-1))
       )
       next_sentence_loss = (
         seq_relationship_score
         .reshape(-1, 2)
-        .sparse_categorical_crossentropy(next_sentence_label.reshape(-1), ignore_index=-1)
+        .sparse_categorical_crossentropy(next_sentence_label.reshape(-1))
       )
       return masked_lm_loss + next_sentence_loss
     return prediction_scores, seq_relationship_score
+
+  def to_cpu(self):
+    params = nn.state.get_state_dict(self)
+    for param in params:
+      self._tensor_to_device(self, param, 'cpu')
+
+  def save(self, filepath: str):
+    nn.state.safe_save(nn.state.get_state_dict(self), fn=filepath)
+
+  def load(self, filepath: str):
+    nn.state.load_state_dict(self, nn.state.safe_load(filepath), verbose=False)
+
+  @staticmethod
+  def _tensor_to_device(obj, path: str, device: str):
+    # Receives a path like "bert.embeddings.word_embeddings.weight" and set value to that attribute
+    paths = path.split(".")
+    for attr in paths[:-1]:
+      if attr.isnumeric():
+        obj = obj[int(attr)]
+      else:
+        obj = getattr(obj, attr)
+    setattr(obj, paths[-1], getattr(obj, paths[-1]).to(device))
 
 
 if __name__ == '__main__':
